@@ -113,7 +113,12 @@ Tức là dataset `59cc937c0594` được tạo từ hai video gốc có sha256 
 ### Câu 9
 Mô tả chính xác điều xảy ra khi trip của bạn sập rồi chạy lại: bao nhiêu task chuyển đỏ, bao nhiêu task `upstream_failed`, bạn clear gì, dữ liệu có nhân đôi không, `dataset_version` có đổi không? Bằng chứng (ảnh, số) là gì?
 
-(trả lời ở đây)
+Trước đó DAG chạy sạch (`clean_run_1`) xanh toàn bộ. Đặt `LAB_FAIL_ONCE=trip-06667`, trigger `day09_reset` rồi `day09_video_pipeline` (run `crash_run_1`, 37 task instance):
+- **1 task đỏ**: `silver_frames` map_index **18** (`trip-06667`), log `attempt=1.log`: `RuntimeError: simulated crash while extracting trip-06667; run it again`.
+- **7 task `upstream_failed`**: `dbt_run_silver, dbt_test_silver, dbt_run_gold, dbt_test_gold, publish_lake, export_dataset, publish_warehouse`.
+- **29 task success**: 3 bronze + `trip_commands` + **25 trip còn lại** của `silver_frames` (một trip hỏng không kéo các partition khác).
+
+Tôi chỉ clear task đỏ (kèm downstream đang `upstream_failed`, `--only-failed`): đúng **1 task chạy lần 2** (chỉ `map_index=18` có `attempt=2.log`, ghi 29 khung của trip-06667), 7 task phía sau chạy lần đầu, DAG chuyển **success**. 25 trip đã xong **không** chạy lại. Sau đó `verify` **27/27**, `silver.frames` có **1246 dòng = 1246 `frame_id` khác nhau** (không nhân đôi, vì extract ghi `overwrite` theo partition trip), và `dataset_version` vẫn **`59cc937c0594`**, giống lần chạy sạch. Bằng chứng: `report/screenshots/airflow_crash_log.png` (log task đỏ) và `airflow_graph.png` (Graph xanh sau khi clear).
 
 ### Câu 10
 Nâng từ 2 drive lên **500 xe mỗi ngày**: ba thành phần nào của pipeline này sẽ vỡ đầu tiên, và bạn thay bằng gì (nối với slide 12, 22, 23)?
@@ -128,10 +133,25 @@ Ngoài ra MinIO một node → S3/cluster MinIO nhiều node, và Metabase galle
 
 Câu SQL bạn thêm vào dashboard và điều nó cho biết:
 
-(trả lời ở đây)
+**Câu 1 — "[Câu hỏi riêng] Tỷ lệ khung bị loại theo từng trip"** (bảng):
+
+```sql
+select drive_id, trip_id, split, avg_speed_kmh, frames, frames_kept,
+       frames - frames_kept as dropped,
+       round(100.0 * (frames - frames_kept) / frames, 1) as drop_pct
+from marts.mart_trip_summary
+order by drop_pct desc
+```
+
+Toàn bộ 1246 khung, 227 bị loại (18,2%). Trip bị loại nhiều nhất: `trip-04622` (drive_a, train) **56,7%** (34/60), `trip-03904` 50,0%, `trip-02086` 46,7%, `trip-08888` 40,0%. Tra ngược trong `silver_frame_telemetry`, cả 4 trip này bị loại **hoàn toàn vì near-duplicate** (0 khung đen, 0 mờ, 0 mất đồng bộ). `trip-08888` (6,5 km/h) và `trip-02086` (17,6 km/h) là xe chạy chậm, hợp lý. Nhưng `trip-04622` chạy **67 km/h** mà vẫn mất 34 khung: cảnh đường lớn đồng nhất làm dHash 9×8 gần như không đổi giữa hai khung cách 0,5 s, tức là cờ "trùng" đang xoá cả khung có nội dung mới.
+
+**Câu 2 (điểm cộng) — "[Câu hỏi riêng 2] Tỷ lệ khung bị loại theo dải tốc độ"** (cột): gom trip theo `avg_speed_kmh`. Kết quả: <20 km/h **32,4%** (5 trip), 20–50 km/h 17,1%, 50–80 km/h 18,9%, ≥80 km/h **8,1%**. Xác nhận tỷ lệ loại giảm khi xe nhanh hơn (câu 5), nhưng dải 50–80 không thấp hơn 20–50 vì các trip kiểu `trip-04622`: một ngưỡng dHash cố định không đủ, nên cân nhắc ngưỡng theo tốc độ.
 
 ## Nhìn lại
 
 Điều bạn thấy bất ngờ nhất, điều gì còn chưa rõ, và một lỗi dữ liệu mà bạn nghĩ pipeline **chưa** bắt được (nếu có). Tối đa 8 dòng.
 
-(trả lời ở đây)
+- **Bất ngờ nhất**: chia theo khung hình làm rò rỉ **cả 26/26 trip** sang train và test; tôi nghĩ chỉ một phần. Và chỉ một dòng `md5(trip_id || MSSV)` đủ làm `dataset_version` khác hẳn (`59cc937c0594` so với `8fc131884584`).
+- **Vận hành trên Windows**: `core.autocrlf=true` biến `airflow-entrypoint.sh` thành CRLF nên container không khởi động (`exec /airflow-entrypoint.sh: no such file or directory`); tôi thêm `.gitattributes` (`*.sh text eol=lf`). Cổng 5433 cũng bị Postgres của project khác chiếm.
+- **Chưa rõ**: `max_gap_ms` chỉ `warn`, nhưng nếu một drive mất tín hiệu quá lâu thì nhiều khung bị loại vì `sync_ok`; ngưỡng nào thì nên dừng hẳn pipeline?
+- **Lỗi pipeline chưa bắt được**: (1) near-duplicate **dương tính giả** ở tốc độ cao (`trip-04622`, 67 km/h, mất 57% khung) vì dHash quá thô; (2) không có kiểm tra telemetry **hợp lý về vật lý** giữa các mẫu (ví dụ gia tốc suy ra từ tốc độ vượt ~1 g, hay GPS nhảy xa) — `in_range` 0..70 m/s chỉ kiểm từng giá trị riêng lẻ; (3) độ lệch đồng hồ B dựa vào con số **khai báo** 1500 ms, nếu khai báo sai thì không có test nào so khớp chéo (ví dụ tương quan chuyển động trong video với tốc độ).
