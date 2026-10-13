@@ -113,12 +113,12 @@ Tức là dataset `59cc937c0594` được tạo từ hai video gốc có sha256 
 ### Câu 9
 Mô tả chính xác điều xảy ra khi trip của bạn sập rồi chạy lại: bao nhiêu task chuyển đỏ, bao nhiêu task `upstream_failed`, bạn clear gì, dữ liệu có nhân đôi không, `dataset_version` có đổi không? Bằng chứng (ảnh, số) là gì?
 
-Trước đó DAG chạy sạch (`clean_run_1`) xanh toàn bộ. Đặt `LAB_FAIL_ONCE=trip-06667`, trigger `day09_reset` rồi `day09_video_pipeline` (run `crash_run_1`, 37 task instance):
+Trước đó DAG chạy sạch (`clean_run_1`) xanh toàn bộ. Đặt `LAB_FAIL_ONCE=trip-06667`, trigger `day09_reset` rồi `day09_video_pipeline` (run `crash_run_2`, 37 task instance):
 - **1 task đỏ**: `silver_frames` map_index **18** (`trip-06667`), log `attempt=1.log`: `RuntimeError: simulated crash while extracting trip-06667; run it again`.
 - **7 task `upstream_failed`**: `dbt_run_silver, dbt_test_silver, dbt_run_gold, dbt_test_gold, publish_lake, export_dataset, publish_warehouse`.
 - **29 task success**: 3 bronze + `trip_commands` + **25 trip còn lại** của `silver_frames` (một trip hỏng không kéo các partition khác).
 
-Tôi chỉ clear task đỏ (kèm downstream đang `upstream_failed`, `--only-failed`): đúng **1 task chạy lần 2** (chỉ `map_index=18` có `attempt=2.log`, ghi 29 khung của trip-06667), 7 task phía sau chạy lần đầu, DAG chuyển **success**. 25 trip đã xong **không** chạy lại. Sau đó `verify` **27/27**, `silver.frames` có **1246 dòng = 1246 `frame_id` khác nhau** (không nhân đôi, vì extract ghi `overwrite` theo partition trip), và `dataset_version` vẫn **`59cc937c0594`**, giống lần chạy sạch. Bằng chứng: `report/screenshots/airflow_crash_log.png` (log task đỏ) và `airflow_graph.png` (Graph xanh sau khi clear).
+Trong giao diện Airflow tôi chọn đúng `silver_frames [18]` và bấm **Clear task** (Map Index: 18, kèm Downstream): đúng **1 task chạy lần 2** (chỉ `map_index=18` có `attempt=2.log`, ghi 29 khung của trip-06667), 7 task phía sau chạy lần đầu, DAG chuyển **success**. 25 trip đã xong **không** chạy lại. Sau đó `verify` **27/27**, `silver.frames` có **1246 dòng = 1246 `frame_id` khác nhau** (không nhân đôi, vì extract ghi `overwrite` theo partition trip), và `dataset_version` vẫn **`59cc937c0594`**, giống lần chạy sạch. Bằng chứng: `report/screenshots/airflow_crash_log.png` (log task đỏ) và `airflow_graph.png` (Graph xanh sau khi clear).
 
 ### Câu 10
 Nâng từ 2 drive lên **500 xe mỗi ngày**: ba thành phần nào của pipeline này sẽ vỡ đầu tiên, và bạn thay bằng gì (nối với slide 12, 22, 23)?
